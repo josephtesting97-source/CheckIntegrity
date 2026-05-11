@@ -62,6 +62,7 @@ $resolvedItems = @($inputPaths | ForEach-Object {
         Get-Item -LiteralPath $_.Path -Force
     }
 })
+
 if ($resolvedItems.Count -eq 0) {
     throw "No files or folders matched the provided path."
 }
@@ -84,14 +85,42 @@ $scanLabel = if ($resolvedItems.Count -eq 1) {
 
 $maxDeepCheckBytes = [int64]$MaxDeepCheckMB * 1MB
 $maxHashBytes = [int64]$MaxHashMB * 1MB
+
 $normalizedExtensions = @()
+
 if ($Extensions) {
     $normalizedExtensions = @($Extensions | ForEach-Object {
         $_ -split ","
     } | ForEach-Object {
         $ext = $_.Trim().ToLowerInvariant()
-        if ($ext -and -not $ext.StartsWith(".")) { ".$ext" } else { $ext }
-    } | Where-Object { $_ } | Select-Object -Unique)
+        if ($ext -and -not $ext.StartsWith(".")) {
+            ".$ext"
+        } else {
+            $ext
+        }
+    } | Where-Object {
+        $_
+    } | Select-Object -Unique)
+}
+
+function Resolve-RelativePath {
+    param(
+        [string]$BasePath,
+        [string]$TargetPath
+    )
+
+    $baseUri = [System.Uri]::new(($BasePath.TrimEnd("\") + "\"))
+    $targetUri = [System.Uri]::new($TargetPath)
+
+    [System.Uri]::UnescapeDataString(
+        $baseUri.MakeRelativeUri($targetUri).ToString()
+    ).Replace("/", "\")
+}
+
+function Join-Issue {
+    param([string[]]$Issues)
+
+    ($Issues | Where-Object { $_ }) -join "; "
 }
 
 function New-CheckResult {
@@ -118,22 +147,6 @@ function New-CheckResult {
     }
 }
 
-function Resolve-RelativePath {
-    param(
-        [string]$BasePath,
-        [string]$TargetPath
-    )
-
-    $baseUri = [System.Uri]::new(($BasePath.TrimEnd("\") + "\"))
-    $targetUri = [System.Uri]::new($TargetPath)
-    [System.Uri]::UnescapeDataString($baseUri.MakeRelativeUri($targetUri).ToString()).Replace("/", "\")
-}
-
-function Join-Issue {
-    param([string[]]$Issues)
-    ($Issues | Where-Object { $_ }) -join "; "
-}
-
 function Read-HeaderBytes {
     param(
         [string]$FilePath,
@@ -141,16 +154,26 @@ function Read-HeaderBytes {
     )
 
     $buffer = New-Object byte[] $Count
-    $stream = [System.IO.File]::Open($FilePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete)
+
+    $stream = [System.IO.File]::Open(
+        $FilePath,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
+    )
+
     try {
         $read = $stream.Read($buffer, 0, $buffer.Length)
+
         if ($read -lt $Count) {
             $short = New-Object byte[] $read
             [Array]::Copy($buffer, $short, $read)
             return $short
         }
+
         return $buffer
-    } finally {
+    }
+    finally {
         $stream.Dispose()
     }
 }
@@ -164,12 +187,20 @@ function Read-TailBytes {
 
     $readCount = [Math]::Min($Count, [int]$FileLength)
     $buffer = New-Object byte[] $readCount
-    $stream = [System.IO.File]::Open($FilePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete)
+
+    $stream = [System.IO.File]::Open(
+        $FilePath,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
+    )
+
     try {
         [void]$stream.Seek(-1 * $readCount, [System.IO.SeekOrigin]::End)
         [void]$stream.Read($buffer, 0, $buffer.Length)
         return $buffer
-    } finally {
+    }
+    finally {
         $stream.Dispose()
     }
 }
@@ -182,11 +213,19 @@ function Get-Sha256 {
     }
 
     $sha = [System.Security.Cryptography.SHA256]::Create()
-    $stream = [System.IO.File]::Open($File.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete)
+
+    $stream = [System.IO.File]::Open(
+        $File.FullName,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
+    )
+
     try {
         $hash = $sha.ComputeHash($stream)
         return ([BitConverter]::ToString($hash)).Replace("-", "").ToLowerInvariant()
-    } finally {
+    }
+    finally {
         $stream.Dispose()
         $sha.Dispose()
     }
@@ -197,19 +236,27 @@ function Test-ZipFile {
 
     $issues = New-Object System.Collections.Generic.List[string]
     $archive = $null
+
     try {
         $archive = [System.IO.Compression.ZipFile]::OpenRead($File.FullName)
+
         $entryCount = 0
+
         foreach ($entry in $archive.Entries) {
             $entryCount++
+
             if ($entry.FullName.EndsWith("/")) {
                 continue
             }
+
             $entryStream = $entry.Open()
+
             try {
                 $buffer = New-Object byte[] 65536
+
                 while ($entryStream.Read($buffer, 0, $buffer.Length) -gt 0) { }
-            } finally {
+            }
+            finally {
                 $entryStream.Dispose()
             }
         }
@@ -217,9 +264,11 @@ function Test-ZipFile {
         if ($entryCount -eq 0) {
             $issues.Add("zip archive has no entries")
         }
-    } catch {
+    }
+    catch {
         $issues.Add("zip validation failed: $($_.Exception.Message)")
-    } finally {
+    }
+    finally {
         if ($archive) {
             $archive.Dispose()
         }
@@ -235,7 +284,9 @@ function Test-OfficePackage {
     )
 
     $issues = New-Object System.Collections.Generic.List[string]
+
     $zipIssues = @(Test-ZipFile -File $File)
+
     foreach ($issue in $zipIssues) {
         $issues.Add($issue)
     }
@@ -251,20 +302,26 @@ function Test-OfficePackage {
     }
 
     $archive = $null
+
     try {
         $archive = [System.IO.Compression.ZipFile]::OpenRead($File.FullName)
+
         $entryNames = @{}
+
         foreach ($entry in $archive.Entries) {
             $entryNames[$entry.FullName.ToLowerInvariant()] = $true
         }
+
         foreach ($required in $requiredEntries[$Kind]) {
             if (-not $entryNames.ContainsKey($required.ToLowerInvariant())) {
                 $issues.Add("missing required Office entry: $required")
             }
         }
-    } catch {
+    }
+    catch {
         $issues.Add("Office package inspection failed: $($_.Exception.Message)")
-    } finally {
+    }
+    finally {
         if ($archive) {
             $archive.Dispose()
         }
@@ -277,15 +334,23 @@ function Test-PdfFile {
     param([System.IO.FileInfo]$File)
 
     $issues = New-Object System.Collections.Generic.List[string]
-    $header = [System.Text.Encoding]::ASCII.GetString((Read-HeaderBytes -FilePath $File.FullName -Count ([Math]::Min(8, [int]$File.Length))))
+
+    $header = [System.Text.Encoding]::ASCII.GetString(
+        (Read-HeaderBytes -FilePath $File.FullName -Count ([Math]::Min(8, [int]$File.Length)))
+    )
+
     if (-not $header.StartsWith("%PDF-")) {
         $issues.Add("PDF header is missing")
     }
 
-    $tail = [System.Text.Encoding]::ASCII.GetString((Read-TailBytes -FilePath $File.FullName -FileLength $File.Length -Count 2048))
+    $tail = [System.Text.Encoding]::ASCII.GetString(
+        (Read-TailBytes -FilePath $File.FullName -FileLength $File.Length -Count 2048)
+    )
+
     if ($tail -notmatch "%%EOF") {
         $issues.Add("PDF EOF marker was not found near the end of the file")
     }
+
     if ($tail -notmatch "startxref") {
         $issues.Add("PDF startxref marker was not found near the end of the file")
     }
@@ -300,7 +365,8 @@ function Test-JsonFile {
         $text = [System.IO.File]::ReadAllText($File.FullName)
         [void]($text | ConvertFrom-Json)
         return @()
-    } catch {
+    }
+    catch {
         return @("JSON parse failed: $($_.Exception.Message)")
     }
 }
@@ -313,7 +379,8 @@ function Test-XmlFile {
         $xml.PreserveWhitespace = $false
         $xml.Load($File.FullName)
         return @()
-    } catch {
+    }
+    catch {
         return @("XML parse failed: $($_.Exception.Message)")
     }
 }
@@ -323,16 +390,21 @@ function Test-ImageFile {
 
     try {
         Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
+
         $image = [System.Drawing.Image]::FromFile($File.FullName)
+
         try {
             [void]$image.Width
             [void]$image.Height
             $image.RawFormat.Guid | Out-Null
-        } finally {
+        }
+        finally {
             $image.Dispose()
         }
+
         return @()
-    } catch {
+    }
+    catch {
         return @("image decode failed: $($_.Exception.Message)")
     }
 }
@@ -342,18 +414,34 @@ function Test-GzipFile {
 
     $fileStream = $null
     $gzipStream = $null
+
     try {
-        $fileStream = [System.IO.File]::Open($File.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete)
-        $gzipStream = [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Decompress)
+        $fileStream = [System.IO.File]::Open(
+            $File.FullName,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
+        )
+
+        $gzipStream = [System.IO.Compression.GZipStream]::new(
+            $fileStream,
+            [System.IO.Compression.CompressionMode]::Decompress
+        )
+
         $buffer = New-Object byte[] 65536
+
         while ($gzipStream.Read($buffer, 0, $buffer.Length) -gt 0) { }
+
         return @()
-    } catch {
+    }
+    catch {
         return @("gzip validation failed: $($_.Exception.Message)")
-    } finally {
+    }
+    finally {
         if ($gzipStream) {
             $gzipStream.Dispose()
         }
+
         if ($fileStream) {
             $fileStream.Dispose()
         }
@@ -364,8 +452,15 @@ function Test-SqliteFile {
     param([System.IO.FileInfo]$File)
 
     $issues = New-Object System.Collections.Generic.List[string]
+
     $headerBytes = Read-HeaderBytes -FilePath $File.FullName -Count ([Math]::Min(100, [int]$File.Length))
-    $headerText = [System.Text.Encoding]::ASCII.GetString($headerBytes, 0, [Math]::Min(16, $headerBytes.Length))
+
+    $headerText = [System.Text.Encoding]::ASCII.GetString(
+        $headerBytes,
+        0,
+        [Math]::Min(16, $headerBytes.Length)
+    )
+
     if ($headerText -ne "SQLite format 3`0") {
         $issues.Add("SQLite header is missing")
         return $issues.ToArray()
@@ -377,12 +472,18 @@ function Test-SqliteFile {
     }
 
     $pageSize = ($headerBytes[16] -shl 8) + $headerBytes[17]
+
     if ($pageSize -eq 1) {
         $pageSize = 65536
     }
-    if ($pageSize -lt 512 -or $pageSize -gt 65536 -or (($pageSize -band ($pageSize - 1)) -ne 0)) {
+
+    if ($pageSize -lt 512 -or
+        $pageSize -gt 65536 -or
+        (($pageSize -band ($pageSize - 1)) -ne 0)) {
+
         $issues.Add("SQLite page size is invalid: $pageSize")
-    } elseif (($File.Length % $pageSize) -ne 0) {
+    }
+    elseif (($File.Length % $pageSize) -ne 0) {
         $issues.Add("SQLite file size is not a multiple of page size $pageSize")
     }
 
@@ -397,7 +498,9 @@ function Test-MagicMismatch {
     }
 
     $ext = $File.Extension.ToLowerInvariant()
+
     $header = Read-HeaderBytes -FilePath $File.FullName -Count ([Math]::Min(16, [int]$File.Length))
+
     $hex = ([BitConverter]::ToString($header)).Replace("-", "")
     $ascii = [System.Text.Encoding]::ASCII.GetString($header)
 
@@ -422,14 +525,28 @@ function Test-File {
     param([System.IO.FileInfo]$File)
 
     $sha256 = ""
+
     $issues = New-Object System.Collections.Generic.List[string]
     $suspicious = New-Object System.Collections.Generic.List[string]
 
     try {
-        $stream = [System.IO.File]::Open($File.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete)
+        $stream = [System.IO.File]::Open(
+            $File.FullName,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
+        )
+
         $stream.Dispose()
-    } catch {
-        return New-CheckResult -File $File -Status "Error" -Severity 3 -Reason "file could not be opened for reading" -Details $_.Exception.Message -Sha256 $sha256
+    }
+    catch {
+        return New-CheckResult `
+            -File $File `
+            -Status "Error" `
+            -Severity 3 `
+            -Reason "file could not be opened for reading" `
+            -Details $_.Exception.Message `
+            -Sha256 $sha256
     }
 
     if ($File.Length -eq 0) {
@@ -440,131 +557,240 @@ function Test-File {
         foreach ($issue in (Test-MagicMismatch -File $File)) {
             $issues.Add($issue)
         }
-    } catch {
+    }
+    catch {
         $issues.Add("header inspection failed: $($_.Exception.Message)")
     }
 
     if ($File.Length -gt 0 -and $File.Length -le $maxDeepCheckBytes) {
+
         $ext = $File.Extension.ToLowerInvariant()
+
         try {
             switch ($ext) {
-                ".zip"  { foreach ($issue in (Test-ZipFile -File $File)) { $issues.Add($issue) } }
-                ".docx" { foreach ($issue in (Test-OfficePackage -File $File -Kind ".docx")) { $issues.Add($issue) } }
-                ".xlsx" { foreach ($issue in (Test-OfficePackage -File $File -Kind ".xlsx")) { $issues.Add($issue) } }
-                ".pptx" { foreach ($issue in (Test-OfficePackage -File $File -Kind ".pptx")) { $issues.Add($issue) } }
-                ".pdf"  { foreach ($issue in (Test-PdfFile -File $File)) { $issues.Add($issue) } }
-                ".json" { foreach ($issue in (Test-JsonFile -File $File)) { $issues.Add($issue) } }
-                ".xml"  { foreach ($issue in (Test-XmlFile -File $File)) { $issues.Add($issue) } }
-                ".svg"  { foreach ($issue in (Test-XmlFile -File $File)) { $issues.Add($issue) } }
-                ".png"  { foreach ($issue in (Test-ImageFile -File $File)) { $issues.Add($issue) } }
-                ".jpg"  { foreach ($issue in (Test-ImageFile -File $File)) { $issues.Add($issue) } }
-                ".jpeg" { foreach ($issue in (Test-ImageFile -File $File)) { $issues.Add($issue) } }
-                ".gif"  { foreach ($issue in (Test-ImageFile -File $File)) { $issues.Add($issue) } }
-                ".bmp"  { foreach ($issue in (Test-ImageFile -File $File)) { $issues.Add($issue) } }
-                ".tif"  { foreach ($issue in (Test-ImageFile -File $File)) { $issues.Add($issue) } }
-                ".tiff" { foreach ($issue in (Test-ImageFile -File $File)) { $issues.Add($issue) } }
-                ".gz"   { foreach ($issue in (Test-GzipFile -File $File)) { $issues.Add($issue) } }
-                ".sqlite" { foreach ($issue in (Test-SqliteFile -File $File)) { $issues.Add($issue) } }
+                ".zip"     { foreach ($issue in (Test-ZipFile -File $File)) { $issues.Add($issue) } }
+                ".docx"    { foreach ($issue in (Test-OfficePackage -File $File -Kind ".docx")) { $issues.Add($issue) } }
+                ".xlsx"    { foreach ($issue in (Test-OfficePackage -File $File -Kind ".xlsx")) { $issues.Add($issue) } }
+                ".pptx"    { foreach ($issue in (Test-OfficePackage -File $File -Kind ".pptx")) { $issues.Add($issue) } }
+                ".pdf"     { foreach ($issue in (Test-PdfFile -File $File)) { $issues.Add($issue) } }
+                ".json"    { foreach ($issue in (Test-JsonFile -File $File)) { $issues.Add($issue) } }
+                ".xml"     { foreach ($issue in (Test-XmlFile -File $File)) { $issues.Add($issue) } }
+                ".svg"     { foreach ($issue in (Test-XmlFile -File $File)) { $issues.Add($issue) } }
+                ".png"     { foreach ($issue in (Test-ImageFile -File $File)) { $issues.Add($issue) } }
+                ".jpg"     { foreach ($issue in (Test-ImageFile -File $File)) { $issues.Add($issue) } }
+                ".jpeg"    { foreach ($issue in (Test-ImageFile -File $File)) { $issues.Add($issue) } }
+                ".gif"     { foreach ($issue in (Test-ImageFile -File $File)) { $issues.Add($issue) } }
+                ".bmp"     { foreach ($issue in (Test-ImageFile -File $File)) { $issues.Add($issue) } }
+                ".tif"     { foreach ($issue in (Test-ImageFile -File $File)) { $issues.Add($issue) } }
+                ".tiff"    { foreach ($issue in (Test-ImageFile -File $File)) { $issues.Add($issue) } }
+                ".gz"      { foreach ($issue in (Test-GzipFile -File $File)) { $issues.Add($issue) } }
+                ".sqlite"  { foreach ($issue in (Test-SqliteFile -File $File)) { $issues.Add($issue) } }
                 ".sqlite3" { foreach ($issue in (Test-SqliteFile -File $File)) { $issues.Add($issue) } }
+
                 ".db" {
-                    $header = [System.Text.Encoding]::ASCII.GetString((Read-HeaderBytes -FilePath $File.FullName -Count ([Math]::Min(16, [int]$File.Length))))
+                    $header = [System.Text.Encoding]::ASCII.GetString(
+                        (Read-HeaderBytes -FilePath $File.FullName -Count ([Math]::Min(16, [int]$File.Length)))
+                    )
+
                     if ($header -eq "SQLite format 3`0") {
-                        foreach ($issue in (Test-SqliteFile -File $File)) { $issues.Add($issue) }
+                        foreach ($issue in (Test-SqliteFile -File $File)) {
+                            $issues.Add($issue)
+                        }
                     }
                 }
             }
-        } catch {
+        }
+        catch {
             $issues.Add("deep validation failed: $($_.Exception.Message)")
         }
-    } elseif ($File.Length -gt $maxDeepCheckBytes) {
+    }
+    elseif ($File.Length -gt $maxDeepCheckBytes) {
         $suspicious.Add("deep checks skipped because file is over ${MaxDeepCheckMB}MB")
     }
 
     if ($IncludeHashes) {
         try {
             $sha256 = Get-Sha256 -File $File
-        } catch {
+        }
+        catch {
             $suspicious.Add("hashing failed: $($_.Exception.Message)")
         }
     }
 
     if ($issues.Count -gt 0) {
-        return New-CheckResult -File $File -Status "Corrupt" -Severity 3 -Reason (Join-Issue -Issues $issues.ToArray()) -Details (Join-Issue -Issues $suspicious.ToArray()) -Sha256 $sha256
+        return New-CheckResult `
+            -File $File `
+            -Status "Corrupt" `
+            -Severity 3 `
+            -Reason (Join-Issue -Issues $issues.ToArray()) `
+            -Details (Join-Issue -Issues $suspicious.ToArray()) `
+            -Sha256 $sha256
     }
 
     if ($suspicious.Count -gt 0) {
-        return New-CheckResult -File $File -Status "Suspicious" -Severity 1 -Reason (Join-Issue -Issues $suspicious.ToArray()) -Details "" -Sha256 $sha256
+        return New-CheckResult `
+            -File $File `
+            -Status "Suspicious" `
+            -Severity 1 `
+            -Reason (Join-Issue -Issues $suspicious.ToArray()) `
+            -Details "" `
+            -Sha256 $sha256
     }
 
-    return New-CheckResult -File $File -Status "OK" -Severity 0 -Reason "" -Details "" -Sha256 $sha256
+    return New-CheckResult `
+        -File $File `
+        -Status "OK" `
+        -Severity 0 `
+        -Reason "" `
+        -Details "" `
+        -Sha256 $sha256
 }
 
+# =========================================================
+# CHANGED SECTION:
+# Only scan:
+#   - files in the root folder
+#   - files in immediate child folders
+# No deeper recursion.
+# =========================================================
+
 $files = @()
+
 foreach ($item in $resolvedItems) {
+
     if ($item.PSIsContainer) {
-        $getChildParams = @{
-            LiteralPath = $item.FullName
-            File        = $true
-            Force       = $true
-            ErrorAction = "SilentlyContinue"
+
+        # Files directly inside the root folder
+        $files += @(Get-ChildItem `
+            -LiteralPath $item.FullName `
+            -File `
+            -Force `
+            -ErrorAction SilentlyContinue)
+
+        # Immediate subfolders only
+        $subfolders = @(Get-ChildItem `
+            -LiteralPath $item.FullName `
+            -Directory `
+            -Force `
+            -ErrorAction SilentlyContinue)
+
+        foreach ($subfolder in $subfolders) {
+
+            # Files inside each immediate subfolder
+            $files += @(Get-ChildItem `
+                -LiteralPath $subfolder.FullName `
+                -File `
+                -Force `
+                -ErrorAction SilentlyContinue)
         }
-        if (-not $NoRecurse) {
-            $getChildParams["Recurse"] = $true
-        }
-        $files += @(Get-ChildItem @getChildParams)
-    } else {
+    }
+    else {
         $files += @($item)
     }
 }
 
 $files = @($files | Sort-Object -Property FullName -Unique)
+
 if (-not $IncludeHidden) {
-    $files = @($files | Where-Object { -not ($_.Attributes -band [System.IO.FileAttributes]::Hidden) })
+    $files = @(
+        $files | Where-Object {
+            -not ($_.Attributes -band [System.IO.FileAttributes]::Hidden)
+        }
+    )
 }
+
 if ($normalizedExtensions.Count -gt 0) {
-    $files = @($files | Where-Object { $normalizedExtensions -contains $_.Extension.ToLowerInvariant() })
+    $files = @(
+        $files | Where-Object {
+            $normalizedExtensions -contains $_.Extension.ToLowerInvariant()
+        }
+    )
 }
 
 $results = New-Object System.Collections.Generic.List[object]
+
 $total = $files.Count
 $index = 0
 
 foreach ($file in $files) {
+
     $index++
+
     if ($index -eq 1 -or $index % 100 -eq 0) {
-        Write-Progress -Activity "Checking files" -Status "$index of $total" -PercentComplete (($index / [Math]::Max($total, 1)) * 100)
+        Write-Progress `
+            -Activity "Checking files" `
+            -Status "$index of $total" `
+            -PercentComplete (($index / [Math]::Max($total, 1)) * 100)
     }
+
     $results.Add((Test-File -File $file))
 }
+
 Write-Progress -Activity "Checking files" -Completed
 
-$orderedResults = @($results | Sort-Object -Property Severity, Path -Descending)
-$summary = @($results | Group-Object Status | Sort-Object Name | Select-Object Name, Count)
+$orderedResults = @(
+    $results | Sort-Object -Property Severity, Path -Descending
+)
+
+$summary = @(
+    $results |
+    Group-Object Status |
+    Sort-Object Name |
+    Select-Object Name, Count
+)
 
 Write-Host ""
 Write-Host "Checked $total file(s) from $scanLabel"
+
 foreach ($row in $summary) {
     Write-Host ("{0,-12} {1,6}" -f $row.Name, $row.Count)
 }
 
-$problemResults = @($results | Where-Object { $_.Status -ne "OK" } | Sort-Object -Property Severity, Path -Descending)
+$problemResults = @(
+    $results |
+    Where-Object { $_.Status -ne "OK" } |
+    Sort-Object -Property Severity, Path -Descending
+)
+
 if ($problemResults.Count -gt 0) {
+
     Write-Host ""
     Write-Host "Files needing attention:"
-    $problemResults | Select-Object Status, RelativePath, Reason, Details | Format-Table -AutoSize -Wrap
-} else {
+
+    $problemResults |
+        Select-Object Status, RelativePath, Reason, Details |
+        Format-Table -AutoSize -Wrap
+}
+else {
+
     Write-Host ""
     Write-Host "No obvious corruption found."
 }
 
 if ($ReportPath) {
-    $fullReportPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ReportPath)
-    $orderedResults | Export-Csv -Path $fullReportPath -NoTypeInformation -Encoding UTF8
+
+    $fullReportPath = $ExecutionContext.SessionState.Path.
+        GetUnresolvedProviderPathFromPSPath($ReportPath)
+
+    $orderedResults |
+        Export-Csv `
+            -Path $fullReportPath `
+            -NoTypeInformation `
+            -Encoding UTF8
+
     Write-Host "CSV report: $fullReportPath"
 }
 
 if ($JsonPath) {
-    $fullJsonPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($JsonPath)
-    $orderedResults | ConvertTo-Json -Depth 4 | Set-Content -Path $fullJsonPath -Encoding UTF8
+
+    $fullJsonPath = $ExecutionContext.SessionState.Path.
+        GetUnresolvedProviderPathFromPSPath($JsonPath)
+
+    $orderedResults |
+        ConvertTo-Json -Depth 4 |
+        Set-Content `
+            -Path $fullJsonPath `
+            -Encoding UTF8
+
     Write-Host "JSON report: $fullJsonPath"
 }
